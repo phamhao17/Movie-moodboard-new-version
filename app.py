@@ -1,163 +1,107 @@
-# app.py
 import streamlit as st
 from PIL import Image
 import requests
 from io import BytesIO
 import os
 import random
-import numpy as np
 
-# Optional AI feature extraction
-import torch
-from torchvision import transforms, models
-from sklearn.metrics.pairwise import cosine_similarity
-
-# API keys from Streamlit Secrets
+# ====== API keys from Streamlit secrets ======
 TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 SPOTIFY_CLIENT_ID = st.secrets["SPOTIFY_CLIENT_ID"]
 SPOTIFY_CLIENT_SECRET = st.secrets["SPOTIFY_CLIENT_SECRET"]
 
-st.set_page_config(page_title="Movie Moodboard AI", layout="wide")
-st.title("🎬 Movie Moodboard AI")
+# ====== Initialize TMDb ======
+from tmdbv3api import TMDb, Movie
+tmdb = TMDb()
+tmdb.api_key = TMDB_API_KEY
+tmdb.language = 'en'
+movie = Movie()
 
-# -------------------------
-# Load movie dataset vectors
-# -------------------------
-# movie_vectors.npy: shape (num_images, feature_dim)
-# movie_files.npy: paths to images in movie_images/
-if os.path.exists("data/movie_vectors.npy") and os.path.exists("data/movie_files.npy"):
-    movie_vectors = np.load("data/movie_vectors.npy")
-    movie_files = np.load("data/movie_files.npy", allow_pickle=True)
-else:
-    movie_vectors = None
-    movie_files = None
+# ====== Initialize Spotify ======
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+spotify_auth = SpotifyClientCredentials(
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET
+)
+spotify = spotipy.Spotify(auth_manager=spotify_auth)
 
-# -------------------------
-# Image Feature Extractor
-# -------------------------
-resnet = models.resnet50(pretrained=True)
-resnet.eval()
-preprocess = transforms.Compose([
-    transforms.Resize(224),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-])
+# ====== Streamlit Config ======
+st.set_page_config(page_title="Movie Moodboard", layout="wide")
+st.title("🎬 Movie Moodboard (Python 3.13 Ready)")
 
-def get_feature_vector(img):
-    img_t = preprocess(img).unsqueeze(0)
-    with torch.no_grad():
-        features = resnet(img_t)
-    return features.squeeze().numpy()
+# ====== User Inputs ======
+scene_description = st.text_area("Describe your movie scene:", "")
+uploaded_file = st.file_uploader("Or upload an image:", type=['jpg','png'])
+mood = st.selectbox("Choose a mood:", ["Happy", "Sad", "Suspenseful", "Romantic"])
 
-# -------------------------
-# User input
-# -------------------------
-st.subheader("1️⃣ Upload an image (optional)")
-uploaded_file = st.file_uploader("Upload an image:", type=["jpg","png"])
+# ====== Helper: placeholder fallback ======
+def get_placeholder(mood):
+    path = os.path.join("assets", f"{mood.lower()}1.jpg")
+    if os.path.exists(path):
+        return Image.open(path)
+    return None
 
-st.subheader("2️⃣ Or enter keywords (optional)")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    character = st.text_input("Character")
-with col2:
-    genre = st.text_input("Genre")
-with col3:
-    setting = st.text_input("Setting")
-with col4:
-    dialogue = st.text_input("Dialogue")
+# ====== TMDb Poster ======
+if scene_description:
+    st.subheader("🎨 Movie Poster (TMDb)")
+    try:
+        results = movie.search(scene_description)
+        if results and results[0].poster_path:
+            poster_url = f"https://image.tmdb.org/t/p/w500{results[0].poster_path}"
+            poster_img = Image.open(BytesIO(requests.get(poster_url).content))
+            st.image(poster_img, caption=results[0].title, use_column_width=True)
+        else:
+            st.info("No poster found. Using placeholder.")
+            placeholder_img = get_placeholder(mood)
+            if placeholder_img:
+                st.image(placeholder_img, caption="Placeholder", use_column_width=True)
+    except Exception as e:
+        st.error(f"TMDb error: {e}")
 
-mood = st.selectbox("Choose mood (affects music):", ["Happy","Sad","Suspenseful","Romantic"])
+# ====== AI Concept Art ======
+if scene_description:
+    st.subheader("🖌️ AI Concept Art (OpenAI DALL·E)")
+    try:
+        import openai
+        openai.api_key = OPENAI_API_KEY
+        prompt = f"Concept art for a {mood.lower()} movie scene: {scene_description}"
+        response = openai.Image.create(prompt=prompt, n=1, size="512x512")
+        image_url = response['data'][0]['url']
+        ai_img = Image.open(BytesIO(requests.get(image_url).content))
+        st.image(ai_img, caption="AI Concept Art", use_column_width=True)
+    except:
+        st.info("OpenAI API error. Using placeholder.")
+        placeholder_img = get_placeholder(mood)
+        if placeholder_img:
+            st.image(placeholder_img, caption="Placeholder", use_column_width=True)
 
-# -------------------------
-# Step 1: Find Movie Images
-# -------------------------
-st.subheader("🎨 Movie Image Suggestions")
-
-found_images = []
-
-# If user uploaded an image
-if uploaded_file and movie_vectors is not None:
-    user_image = Image.open(uploaded_file)
-    st.image(user_image, caption="Uploaded Image", use_column_width=True)
-    
-    # Extract feature vector
-    user_vector = get_feature_vector(user_image)
-    similarities = cosine_similarity([user_vector], movie_vectors)[0]
-    top_idx = similarities.argsort()[-5:][::-1]
-    for idx in top_idx:
-        img_path = movie_files[idx]
-        if os.path.exists(img_path):
-            found_images.append(img_path)
-            st.image(Image.open(img_path), caption=f"Similar: {os.path.basename(img_path)}", width=200)
-
-# If no upload or no dataset, fallback to keyword search
-if not found_images:
-    st.info("No uploaded image or dataset missing. Using keyword search / placeholder images.")
-    
-    # Simple local placeholder logic
-    mood_images = {
-        "Happy":["assets/happy1.jpg","assets/happy2.jpg"],
-        "Sad":["assets/sad1.jpg","assets/sad2.jpg"],
-        "Romantic":["assets/romantic1.jpg"],
-        "Suspenseful":["assets/suspense1.jpg"]
-    }
-    if mood in mood_images and mood_images[mood]:
-        selected_image = random.choice(mood_images[mood])
-        if os.path.exists(selected_image):
-            st.image(Image.open(selected_image), caption=f"{mood} Placeholder", use_column_width=True)
-
-# -------------------------
-# Step 2: Music Suggestion
-# -------------------------
+# ====== Music Suggestion ======
 st.subheader("🎵 Suggested Music Playlist")
 try:
-    import spotipy
-    from spotipy.oauth2 import SpotifyClientCredentials
-    spotify_auth = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-    spotify = spotipy.Spotify(auth_manager=spotify_auth)
-    
     results = spotify.search(q=mood, type='playlist', limit=1)
     if results['playlists']['items']:
         playlist = results['playlists']['items'][0]
         st.markdown(f"[{playlist['name']}]({playlist['external_urls']['spotify']})")
     else:
-        st.info("No playlist found for this mood.")
-except Exception as e:
-    st.info("Spotify API error or placeholder used.")
+        st.info("No playlist found. Using example link.")
+except:
+    st.info("Spotify API error. Using example link.")
+    st.write("🎵 Example playlist link")
 
-# -------------------------
-# Step 3: Movie Suggestion (TMDb API)
-# -------------------------
-st.subheader("🎬 Suggested Movies")
-try:
-    import requests
-    tmdb_url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={genre or character or setting or dialogue}"
-    response = requests.get(tmdb_url)
-    data = response.json()
-    if data.get("results"):
-        for m in data["results"][:5]:
-            title = m.get("title")
-            poster_path = m.get("poster_path")
-            if poster_path:
-                poster_url = f"https://image.tmdb.org/t/p/w200{poster_path}"
-                st.image(poster_url, caption=title)
-            else:
-                st.write(title)
-    else:
-        st.info("No movie found for the given keywords.")
-except Exception as e:
-    st.info("TMDb API error or placeholder used.")
-
-# -------------------------
-# Step 4: Scene Summary
-# -------------------------
+# ====== Scene Summary ======
 st.subheader("📝 Scene Summary")
-st.write(f"Character: {character}")
-st.write(f"Genre: {genre}")
-st.write(f"Setting: {setting}")
-st.write(f"Dialogue: {dialogue}")
+st.write(f"Scene: {scene_description}")
 st.write(f"Mood: {mood}")
+
+# ====== Uploaded Image Display ======
 if uploaded_file:
-    st.write("Image uploaded by user.")
+    try:
+        img = Image.open(uploaded_file)
+        st.image(img, caption="Uploaded Image", use_column_width=True)
+    except:
+        st.info("Uploaded image cannot be displayed. Using placeholder.")
+        placeholder_img = get_placeholder(mood)
+        if placeholder_img:
+            st.image(placeholder_img, caption="Placeholder", use_column_width=True)
